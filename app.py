@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import sqlite3
 import pandas as pd
 from PIL import Image
@@ -16,10 +17,10 @@ from google.genai import types
 # ---------------------------------------------------------
 DB_FILE = "bakery_calc.db"
 
+
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Pantry Table
     c.execute("""
         CREATE TABLE IF NOT EXISTS pantry (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -29,7 +30,6 @@ def init_db():
             price REAL
         )
     """)
-    # Seed sample pantry items if empty
     c.execute("SELECT COUNT(*) FROM pantry")
     if c.fetchone()[0] == 0:
         samples = [
@@ -39,29 +39,41 @@ def init_db():
             ("Large Eggs", 12.0, "count", 3.50),
             ("Vanilla Extract", 2.0, "fl_oz", 7.00),
         ]
-        c.executemany("INSERT INTO pantry (name, quantity, unit, price) VALUES (?, ?, ?, ?)", samples)
+        c.executemany(
+            "INSERT INTO pantry (name, quantity, unit, price) VALUES (?, ?,"
+            " ?, ?)",
+            samples,
+        )
     conn.commit()
     conn.close()
 
+
 def get_pantry():
     conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql("SELECT name, quantity, unit, price FROM pantry ORDER BY name ASC", conn)
+    df = pd.read_sql(
+        "SELECT name, quantity, unit, price FROM pantry ORDER BY name ASC", conn
+    )
     conn.close()
     return df.to_dict(orient="records")
+
 
 def save_pantry_item(name, qty, unit, price):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("""
+    c.execute(
+        """
         INSERT INTO pantry (name, quantity, unit, price)
         VALUES (?, ?, ?, ?)
         ON CONFLICT(name) DO UPDATE SET
             quantity=excluded.quantity,
             unit=excluded.unit,
             price=excluded.price
-    """, (name, qty, unit, price))
+    """,
+        (name, qty, unit, price),
+    )
     conn.commit()
     conn.close()
+
 
 init_db()
 
@@ -71,7 +83,9 @@ init_db()
 ureg = pint.UnitRegistry()
 ureg.define("count = 1 = item = piece = each = jar = can = bottle")
 
-st.set_page_config(page_title="Baker & Caterer Cost Engine", page_icon="🧁", layout="wide")
+st.set_page_config(
+    page_title="Baker & Caterer Cost Engine", page_icon="🧁", layout="wide"
+)
 
 DENSITY_MAP = {
     "flour": 120.0,
@@ -94,6 +108,7 @@ if "extracted_items" not in st.session_state:
 if "extracted_store" not in st.session_state:
     st.session_state.extracted_store = ""
 
+
 # ---------------------------------------------------------
 # 3. RECEIPT OCR ENGINE
 # ---------------------------------------------------------
@@ -103,9 +118,11 @@ class ExtractedPantryItem(BaseModel):
     unit: str
     price: float
 
+
 class ReceiptExtractResponse(BaseModel):
     store_name: str
     items: list[ExtractedPantryItem]
+
 
 def parse_receipt_image(image_bytes):
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -126,7 +143,10 @@ def parse_receipt_image(image_bytes):
     try:
         response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=[types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"), prompt],
+            contents=[
+                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                prompt,
+            ],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=ReceiptExtractResponse,
@@ -138,7 +158,12 @@ def parse_receipt_image(image_bytes):
         try:
             response = client.models.generate_content(
                 model="gemini-1.5-flash",
-                contents=[types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"), prompt],
+                contents=[
+                    types.Part.from_bytes(
+                        data=image_bytes, mime_type="image/jpeg"
+                    ),
+                    prompt,
+                ],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     response_schema=ReceiptExtractResponse,
@@ -149,6 +174,7 @@ def parse_receipt_image(image_bytes):
         except Exception as err:
             st.error(f"API busy. Please retry in a few seconds. ({err})")
             return None
+
 
 def calculate_ingredient_cost(pantry_item, recipe_qty, recipe_unit):
     try:
@@ -183,10 +209,26 @@ def calculate_ingredient_cost(pantry_item, recipe_qty, recipe_unit):
     except Exception:
         return None
 
+
 # ---------------------------------------------------------
-# 4. PDF QUOTE GENERATOR
+# 4. PDF QUOTE GENERATOR (WITH EMOJI SANITIZATION)
 # ---------------------------------------------------------
-def generate_pdf_quote(recipe_title, yield_count, items, total_cogs, cost_per_unit, srp_batch, srp_unit):
+def clean_pdf_text(text):
+    """Strips non-Latin1 characters and emojis to prevent FPDF crashes."""
+    return (
+        re.sub(r"[^\x00-\xFF]", "", str(text)).replace("⚠️", "[!]").strip()
+    )
+
+
+def generate_pdf_quote(
+    recipe_title,
+    yield_count,
+    items,
+    total_cogs,
+    cost_per_unit,
+    srp_batch,
+    srp_unit,
+):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 18)
@@ -194,7 +236,8 @@ def generate_pdf_quote(recipe_title, yield_count, items, total_cogs, cost_per_un
     pdf.ln(5)
 
     pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(0, 8, f"Recipe / Item: {recipe_title or 'Custom Order'}", ln=True)
+    clean_title = clean_pdf_text(recipe_title) or "Custom Order"
+    pdf.cell(0, 8, f"Recipe / Item: {clean_title}", ln=True)
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(0, 6, f"Batch Yield: {yield_count} servings/units", ln=True)
     pdf.ln(4)
@@ -209,9 +252,9 @@ def generate_pdf_quote(recipe_title, yield_count, items, total_cogs, cost_per_un
     # Table Body
     pdf.set_font("Helvetica", "", 10)
     for itm in items:
-        pdf.cell(100, 7, str(itm["Ingredient"]), border=1)
-        pdf.cell(40, 7, str(itm["Amount"]), border=1)
-        pdf.cell(40, 7, str(itm["Cost"]), border=1, ln=True)
+        pdf.cell(100, 7, clean_pdf_text(itm["Ingredient"]), border=1)
+        pdf.cell(40, 7, clean_pdf_text(itm["Amount"]), border=1)
+        pdf.cell(40, 7, clean_pdf_text(itm["Cost"]), border=1, ln=True)
 
     pdf.ln(6)
     pdf.set_font("Helvetica", "B", 11)
@@ -221,6 +264,7 @@ def generate_pdf_quote(recipe_title, yield_count, items, total_cogs, cost_per_un
     pdf.cell(0, 7, f"Suggested Unit Price: ${srp_unit:.2f}", ln=True)
 
     return bytes(pdf.output())
+
 
 # ---------------------------------------------------------
 # 5. UI TABS
@@ -238,28 +282,71 @@ with tab_builder:
 
     with col_left:
         st.subheader("Recipe Formulation")
-        recipe_name = st.text_input("Recipe Title", placeholder="e.g. Vanilla Cupcake Batch")
-        batch_yield = st.number_input("Batch Yield (Total Servings/Units)", min_value=1, value=12, step=1)
+        recipe_name = st.text_input(
+            "Recipe Title", placeholder="e.g. Vanilla Cupcake Batch"
+        )
+        batch_yield = st.number_input(
+            "Batch Yield (Total Servings/Units)",
+            min_value=1,
+            value=12,
+            step=1,
+        )
 
         st.markdown("**Add Ingredients**")
         pantry_names = [item["name"] for item in current_pantry]
 
         if pantry_names:
             c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
-            selected_ing = c1.selectbox("Ingredient", options=pantry_names, label_visibility="collapsed")
-            ing_qty = c2.number_input("Qty", min_value=0.01, value=1.0, step=0.25, label_visibility="collapsed")
-            ing_unit = c3.selectbox("Unit", options=["cup", "tbsp", "tsp", "oz", "g", "lb", "fl_oz", "count"], label_visibility="collapsed")
+            selected_ing = c1.selectbox(
+                "Ingredient", options=pantry_names, label_visibility="collapsed"
+            )
+            ing_qty = c2.number_input(
+                "Qty",
+                min_value=0.01,
+                value=1.0,
+                step=0.25,
+                label_visibility="collapsed",
+            )
+            ing_unit = c3.selectbox(
+                "Unit",
+                options=[
+                    "cup",
+                    "tbsp",
+                    "tsp",
+                    "oz",
+                    "g",
+                    "lb",
+                    "fl_oz",
+                    "count",
+                ],
+                label_visibility="collapsed",
+            )
 
             if c4.button("Add to Recipe", use_container_width=True):
-                st.session_state.recipe_items.append({"name": selected_ing, "qty": ing_qty, "unit": ing_unit})
+                st.session_state.recipe_items.append(
+                    {"name": selected_ing, "qty": ing_qty, "unit": ing_unit}
+                )
 
         table_rows = []
         total_ingredients_cost = 0.0
 
         if st.session_state.recipe_items:
             for item in st.session_state.recipe_items:
-                p_item = next((p for p in current_pantry if p["name"] == item["name"]), None)
-                line_cost = calculate_ingredient_cost(p_item, item["qty"], item["unit"]) if p_item else None
+                p_item = next(
+                    (
+                        p
+                        for p in current_pantry
+                        if p["name"] == item["name"]
+                    ),
+                    None,
+                )
+                line_cost = (
+                    calculate_ingredient_cost(
+                        p_item, item["qty"], item["unit"]
+                    )
+                    if p_item
+                    else None
+                )
 
                 if line_cost is not None:
                     total_ingredients_cost += line_cost
@@ -267,7 +354,13 @@ with tab_builder:
                 else:
                     cost_display = "⚠️ Unit Mismatch"
 
-                table_rows.append({"Ingredient": item["name"], "Amount": f"{item['qty']} {item['unit']}", "Cost": cost_display})
+                table_rows.append(
+                    {
+                        "Ingredient": item["name"],
+                        "Amount": f"{item['qty']} {item['unit']}",
+                        "Cost": cost_display,
+                    }
+                )
 
             st.dataframe(pd.DataFrame(table_rows), use_container_width=True)
 
@@ -279,15 +372,26 @@ with tab_builder:
 
     with col_right:
         st.subheader("Overhead, Labor & Margins")
-        labor_rate = st.number_input("Baker Labor Rate ($/hour)", min_value=0.0, value=0.00, step=1.0)
-        prep_hours = st.number_input("Prep & Bake Time (Hours)", min_value=0.0, value=0.00, step=0.25)
-        packaging_cost = st.number_input("Packaging / Boxes ($)", min_value=0.0, value=0.00, step=0.50)
-        target_margin = st.slider("Target Gross Margin (%)", min_value=10, max_value=85, value=65) / 100.0
+        labor_rate = st.number_input(
+            "Baker Labor Rate ($/hour)", min_value=0.0, value=0.00, step=1.0
+        )
+        prep_hours = st.number_input(
+            "Prep & Bake Time (Hours)", min_value=0.0, value=0.00, step=0.25
+        )
+        packaging_cost = st.number_input(
+            "Packaging / Boxes ($)", min_value=0.0, value=0.00, step=0.50
+        )
+        target_margin = (
+            st.slider("Target Gross Margin (%)", min_value=10, max_value=85, value=65)
+            / 100.0
+        )
 
         labor_cost = labor_rate * prep_hours
         total_cogs = total_ingredients_cost + packaging_cost + labor_cost
         cost_per_unit = total_cogs / batch_yield if batch_yield else 0
-        srp_batch = total_cogs / (1.0 - target_margin) if target_margin < 1.0 else 0
+        srp_batch = (
+            total_cogs / (1.0 - target_margin) if target_margin < 1.0 else 0
+        )
         srp_unit = srp_batch / batch_yield if batch_yield else 0
         net_profit = srp_batch - total_cogs
 
@@ -303,19 +407,34 @@ with tab_builder:
 
         # PDF Export Button
         if table_rows:
-            pdf_data = generate_pdf_quote(recipe_name, batch_yield, table_rows, total_cogs, cost_per_unit, srp_batch, srp_unit)
+            pdf_data = generate_pdf_quote(
+                recipe_name,
+                batch_yield,
+                table_rows,
+                total_cogs,
+                cost_per_unit,
+                srp_batch,
+                srp_unit,
+            )
+            safe_filename = (
+                (recipe_name or "Recipe")
+                .replace(" ", "_")
+                .replace("/", "_")
+            )
             st.download_button(
                 label="📄 Download Recipe Quote (PDF)",
                 data=pdf_data,
-                file_name=f"{(recipe_name or 'Recipe').replace(' ', '_')}_quote.pdf",
+                file_name=f"{safe_filename}_quote.pdf",
                 mime="application/pdf",
-                use_container_width=True
+                use_container_width=True,
             )
 
 # --- TAB 2: RECEIPT SCANNER ---
 with tab_receipt:
     st.subheader("AI Grocery Receipt Scanner")
-    uploaded_file = st.file_uploader("Upload Receipt Image", type=["jpg", "jpeg", "png"])
+    uploaded_file = st.file_uploader(
+        "Upload Receipt Image", type=["jpg", "jpeg", "png"]
+    )
 
     if uploaded_file:
         img = Image.open(uploaded_file)
@@ -328,14 +447,21 @@ with tab_receipt:
                 result = parse_receipt_image(buf.getvalue())
                 if result and result.items:
                     st.session_state.extracted_store = result.store_name
-                    st.session_state.extracted_items = [item.model_dump() for item in result.items]
+                    st.session_state.extracted_items = [
+                        item.model_dump() for item in result.items
+                    ]
                     st.success(f"Extracted from {result.store_name}!")
 
     if st.session_state.extracted_items:
-        st.dataframe(pd.DataFrame(st.session_state.extracted_items), use_container_width=True)
-        if st.button("Save All to SQLite Pantry", type="primary"):
+        st.dataframe(
+            pd.DataFrame(st.session_state.extracted_items),
+            use_container_width=True,
+        )
+        if st.button("Save All to Pantry", type="primary"):
             for itm in st.session_state.extracted_items:
-                save_pantry_item(itm["name"], itm["quantity"], itm["unit"], itm["price"])
+                save_pantry_item(
+                    itm["name"], itm["quantity"], itm["unit"], itm["price"]
+                )
             st.session_state.extracted_items = []
             st.toast("✅ Saved permanently to pantry!", icon="💾")
             st.rerun()
