@@ -1,7 +1,0 @@
-streamlit
-google-genai
-pint
-pydantic
-pillow
-pandas
-fpdf2
