@@ -1,0 +1,21 @@
+# Python environment and generated files
+.venv/
+__pycache__/
+*.py[cod]
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Streamlit and OAuth secrets
+.streamlit/secrets.toml
+.streamlit/secrets.*.toml
+client_secret*.json
+credentials*.json
+token*.json
+
+# Local database and backups
+bakery_calc.db
+bakery_calc_*.db
+backups/
